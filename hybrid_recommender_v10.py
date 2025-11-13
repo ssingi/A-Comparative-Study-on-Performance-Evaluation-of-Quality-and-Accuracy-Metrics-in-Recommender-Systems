@@ -11,12 +11,6 @@
 # 2. MovieLens Small(100K) 및 1M 데이터셋 자동 처리
 # 3. 희소성을 고려한 공정한 성능 평가
 # 4. 필터 버블 현상 완화 능력 측정
-#
-# [예상 독자]
-# - 추천 시스템 연구자
-# - 데이터 과학자
-# - 논문 작성자
-#
 # =====================================================================================================
 
 import os
@@ -909,7 +903,7 @@ def main():
         print(results_df[['Dataset', 'Method', 'Diversity', 'Coverage', 'Novelty', 'PopularityBias']].to_string(index=False))
 
         # CSV 저장
-        output_filename = 'hybrid_recommender_V9.csv'
+        output_filename = 'hybrid_recommender_V10.csv'
         results_df.to_csv(output_filename, index=False)
         print(f"\n✅ 결과 저장: {output_filename}")
 
@@ -935,6 +929,14 @@ def main():
     else:
         print("❌ 처리된 데이터셋이 없습니다")
 
+EXPERIMENTAL_SETUP = {
+    'dataset': 'MovieLens Small (100K)',
+    'train_test_split': '80/20 (user-based)',
+    'cv_folds': 5,
+    'random_seed': 42,
+    'svd_dimensions': 200,
+    'evaluation_metrics': 18
+}
 
 if __name__ == "__main__":
     # 🆕 먼저 검증 수행
