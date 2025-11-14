@@ -478,38 +478,54 @@ class OptimizedHybridRecommender:
 
 
     # ════════════════════════════════════════════════════════════════════════════════════════════════
-    # 추천 방법 1: CF (협력필터링)
+    # 추천 방법 1: CF (협력필터링) - 개선
     # Koren et al. (2009): Matrix Factorization Techniques
     # ════════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     def predict_cf(self, user_id, movie_id):
-        """CF: SVD 특징 기반 사용자-영화 상호작용 예측 (개선)"""
+        """CF: SVD 특징 기반 사용자-영화 상호작용 예측
+        
+        개선점:
+        - 사용자 활동성에 따른 신뢰도 가중치
+        - 잠재 요인 강도 증폭 (희소성 보완)
+        """
         if user_id not in self.user_factors or movie_id not in self.movie_factors:
             return self.mean_rating
         
         user_vec = self.user_factors[user_id]
         movie_vec = self.movie_factors[movie_id]
         
-        # ✅ 잠재 인수 상호작용 (정규화 제거로 크기 유지)
+        # ✅ 개선 1: 잠재 인수 상호작용 강화
         latent_score = np.dot(user_vec, movie_vec)
-        latent_score = np.clip(latent_score, -1, 1)
-        scaled_score = latent_score * self.std_rating
+        latent_score = np.clip(latent_score, -2, 2)  # 범위 확대
         
-        # ✅ 편향 추가
-        ub = self.user_bias.get(user_id, 0) * 1.0
-        mb = self.movie_bias.get(movie_id, 0) * 1.0
+        # ✅ 개선 2: 사용자 활동성 기반 신뢰도
+        user_ratings_count = len(self.train[self.train['userId'] == user_id])
+        activity_weight = min(user_ratings_count / 20.0, 1.5)  # 최대 1.5배
+        
+        scaled_score = latent_score * self.std_rating * activity_weight
+        
+        # ✅ 개선 3: 편향 가중치 증가
+        ub = self.user_bias.get(user_id, 0) * 1.2
+        mb = self.movie_bias.get(movie_id, 0) * 1.2
         
         pred = self.mean_rating + scaled_score + ub + mb
         return np.clip(pred, 1, 5)
 
 
     # ════════════════════════════════════════════════════════════════════════════════════════════════
-    # 추천 방법 2: CB (콘텐츠 기반)
+    # 추천 방법 2: CB (콘텐츠 기반) - 개선
     # Pazzani & Billsus (2007): Content-Based Recommendation Systems
     # ════════════════════════════════════════════════════════════════════════════════════════════════
     
     def predict_cb(self, user_id, movie_id):
-        """CB: 영화 콘텐츠 유사도 기반 예측 (개선)"""
+        """CB: 영화 콘텐츠 유사도 기반 예측
+        
+        개선점:
+        - 유사도 임계값 낮춤 (더 많은 이웃 활용)
+        - 신뢰도 계산 강화 (일관성, 다양성)
+        - 가중치 메커니즘 개선
+        """
         if movie_id not in self.item_to_idx:
             return self.mean_rating
         
@@ -521,24 +537,25 @@ class OptimizedHybridRecommender:
         if len(rated_movies) == 0:
             return self.mean_rating
 
+        # ✅ 개선 1: 신뢰도 계산 강화
         num_ratings = len(rated_movies)
-        activity_confidence = min(num_ratings / 15.0, 1.0)
+        activity_confidence = min(num_ratings / 10.0, 1.2)  # 임계값 낮춤
         
         if num_ratings > 1:
             rating_std = user_ratings['rating'].std()
-            # ✅ 수정: std 범위 정규화 (0~2.5 → 0~1)
             normalized_std = rating_std / 2.5
-            consistency_confidence = 1.0 / (1.0 + normalized_std)
+            consistency_confidence = 1.0 / (1.0 + normalized_std * 0.3)  # 가중치 감소
         else:
-            consistency_confidence = 0.5
+            consistency_confidence = 0.7  # 기본값 증가
         
         rating_range = user_ratings['rating'].max() - user_ratings['rating'].min()
         if rating_range > 0:
-            diversity_confidence = min(rating_range / 4.0, 1.0)
+            diversity_confidence = min(rating_range / 3.0, 1.2)  # 범위 확대
         else:
-            diversity_confidence = 0.2
+            diversity_confidence = 0.5  # 기본값 증가
         
-        overall_confidence = (activity_confidence + consistency_confidence + diversity_confidence) / 3.0
+        # ✅ 개선 2: 가중 평균 (일관성 2배 가중)
+        overall_confidence = (activity_confidence + 2*consistency_confidence + diversity_confidence) / 4.0
 
         weighted_ratings = []
         
@@ -551,103 +568,210 @@ class OptimizedHybridRecommender:
             
             similarity = self.item_similarity[rated_idx, target_idx]
             
-            if similarity > 0.1:
+            # ✅ 개선 3: 유사도 임계값 낮춤 (0.1 → 0.05)
+            if similarity > 0.05:
                 rating = user_ratings[user_ratings['movieId'] == rated_movie_id]['rating'].values[0]
                 normalized_rating = (rating - self.mean_rating) / (self.std_rating + 1e-8)
-                normalized_rating = np.clip(normalized_rating, -1, 1)
+                normalized_rating = np.clip(normalized_rating, -1.5, 1.5)  # 범위 확대
                 
-                weight = similarity * overall_confidence
+                # ✅ 개선 4: 유사도 제곱근 (작은 유사도도 활용)
+                weight = (similarity ** 0.7) * overall_confidence
                 weighted_ratings.append(normalized_rating * weight)
 
         if not weighted_ratings:
             return self.mean_rating
 
         cb_score = np.mean(weighted_ratings)
-        cb_score = np.clip(cb_score, -1, 1)
+        cb_score = np.clip(cb_score, -1.5, 1.5)
         
-        pred = self.mean_rating + cb_score * self.std_rating
+        # ✅ 개선 5: CB 신호 증폭
+        pred = self.mean_rating + cb_score * self.std_rating * 1.3
         return np.clip(pred, 1, 5)
 
 
     # ════════════════════════════════════════════════════════════════════════════════════════════════
-    # 추천 방법 3: Weighted Average (가중 평균 하이브리드)
+    # 추천 방법 3: Weighted Average (가중 평균) - 재설계
     # Burke (2002): Weighted Strategy
-    # Autexier et al. (2010): 최적 가중치는 CF:CB = 60:40 ~ 70:30 범위
+    # Chen et al. (2023): 사용자별 동적 가중치 조정
     # ════════════════════════════════════════════════════════════════════════════════════════════════
-    
+
     def predict_weighted_avg(self, user_id, movie_id):
-        """하이브리드 (가중 평균): CF와 CB 비율 조정
-    
-        ✅ 수정: 가중치를 본 연구의 최적값 (4:6)으로 변경
-    
-        논문 근거:
-        - [참고자료.md] 섹션 5.1 발견 2:
-          "가중치 0.4:0.6이 최적인 이유:
-           CF 신호의 희소성 → CB로 보완
-           CB의 설명성 + CF의 협력 효과
-           선행 연구와 일치 (Chen et al., 2023)"
+        """하이브리드 (가중 평균): 사용자별 동적 가중치
+        
+        선행 연구:
+        - Burke (2002): 각 방법의 신뢰도에 따라 가중치 조정
+        - Chen et al. (2023): 희소 데이터에서 CB 비중 증가
+        
+        동적 가중치 전략:
+        - 활동적 사용자 (평가 많음): CF 비중 증가 (CF 60% : CB 40%)
+        - 비활동적 사용자 (평가 적음): CB 비중 증가 (CF 30% : CB 70%)
         """
         cf = self.predict_cf(user_id, movie_id)
         cb = self.predict_cb(user_id, movie_id)
         
-        # ✅ 수정: 본 연구 최적 가중치
-        alpha = 0.40  # CF 비중
-        beta = 0.60   # CB 비중
+        # ✅ 개선: 사용자 활동성 기반 동적 가중치
+        user_ratings_count = len(self.train[self.train['userId'] == user_id])
+        
+        if user_ratings_count >= 50:
+            # 활동적 사용자: CF 신뢰도 높음
+            alpha = 0.65  # CF
+            beta = 0.35   # CB
+        elif user_ratings_count >= 20:
+            # 중간 사용자: 균형
+            alpha = 0.50
+            beta = 0.50
+        else:
+            # 비활동적 사용자: CB 의존
+            alpha = 0.35
+            beta = 0.65
         
         pred = alpha * cf + beta * cb
         return np.clip(pred, 1, 5)
 
+
+    # ════════════════════════════════════════════════════════════════════════════════════════════════
+    # 추천 방법 4: Feature Combination (특징 결합) - 재설계
+    # Koren et al. (2009): Factorization Meets the Neighborhood
+    # Lops et al. (2011): Content-based Recommender Systems
+    # ════════════════════════════════════════════════════════════════════════════════════════════════
+
     def predict_feature_combo(self, user_id, movie_id):
-        """하이브리드 (특징 결합)"""
+        """하이브리드 (특징 결합): SVD + 콘텐츠 특징 융합
+        
+        선행 연구:
+        - Koren et al. (2009): 잠재 요인과 이웃 정보 결합
+        - Lops et al. (2011): 사용자 프로필 × 아이템 특징
+        
+        전략:
+        1. CF 잠재 요인 점수 계산
+        2. CB 사용자 프로필 × 아이템 특징 계산
+        3. 비선형 결합 (sigmoid 변환)
+        """
+        # ✅ 1단계: CF 잠재 요인 점수
         if user_id not in self.user_factors or movie_id not in self.movie_factors:
-            return self.mean_rating
+            cf_score = 0
+        else:
+            user_vec = self.user_factors[user_id]
+            movie_vec = self.movie_factors[movie_id]
+            cf_score = np.dot(user_vec, movie_vec)
+            cf_score = np.clip(cf_score, -2, 2)
         
-        user_vec = self.user_factors[user_id]
-        movie_vec = self.movie_factors[movie_id]
-        cf_score = np.dot(user_vec, movie_vec)
-        
+        # ✅ 2단계: CB 콘텐츠 프로필 점수
         if movie_id not in self.movie_features:
-            return self.mean_rating
-        content_vec = self.movie_features[movie_id]
-        
-        user_ratings = self.train[self.train['userId'] == user_id]
-        if user_ratings.empty:
             cb_score = 0
         else:
-            content_vecs = []
-            for rated_movie_id in user_ratings['movieId'].values:
-                if rated_movie_id in self.movie_features:
-                    content_vecs.append(self.movie_features[rated_movie_id])
+            content_vec = self.movie_features[movie_id]
             
-            if content_vecs:
-                user_content_profile = np.mean(content_vecs, axis=0)
-                # ✅ 수정: 변수명 명확화
-                user_norm = np.linalg.norm(user_content_profile) + 1e-8
-                user_content_profile = user_content_profile / user_norm
-                
-                content_norm = np.linalg.norm(content_vec) + 1e-8
-                content_vec_normalized = content_vec / content_norm
-                
-                cb_score = np.dot(user_content_profile, content_vec_normalized)
-            else:
+            # 사용자 콘텐츠 프로필 생성 (평가한 영화들의 특징 평균)
+            user_ratings = self.train[self.train['userId'] == user_id]
+            if user_ratings.empty:
                 cb_score = 0
+            else:
+                content_vecs = []
+                rating_weights = []
+                
+                for _, row in user_ratings.iterrows():
+                    rated_movie_id = row['movieId']
+                    rating = row['rating']
+                    
+                    if rated_movie_id in self.movie_features:
+                        content_vecs.append(self.movie_features[rated_movie_id])
+                        # ✅ 평점 가중치: 높은 평점일수록 선호
+                        normalized_rating = (rating - self.mean_rating) / (self.std_rating + 1e-8)
+                        rating_weights.append(max(normalized_rating, 0))  # 양수만
+                
+                if content_vecs:
+                    # ✅ 가중 평균 프로필
+                    rating_weights = np.array(rating_weights)
+                    if rating_weights.sum() > 0:
+                        rating_weights = rating_weights / rating_weights.sum()
+                        user_content_profile = np.average(content_vecs, axis=0, weights=rating_weights)
+                    else:
+                        user_content_profile = np.mean(content_vecs, axis=0)
+                    
+                    # 정규화
+                    user_norm = np.linalg.norm(user_content_profile) + 1e-8
+                    user_content_profile = user_content_profile / user_norm
+                    
+                    content_norm = np.linalg.norm(content_vec) + 1e-8
+                    content_vec_normalized = content_vec / content_norm
+                    
+                    cb_score = np.dot(user_content_profile, content_vec_normalized)
+                    cb_score = np.clip(cb_score, -1, 1)
+                else:
+                    cb_score = 0
+    
+        # ✅ 3단계: 비선형 결합 (상호작용 항 추가)
+        # cf_score와 cb_score의 곱셈: 두 신호가 모두 강할 때 증폭
+        interaction_score = cf_score * cb_score * 0.3
         
-        combined_score = 0.5 * cf_score + 0.5 * cb_score
-        pred = self.mean_rating + combined_score * self.std_rating
+        combined_score = 0.4 * cf_score + 0.4 * cb_score + 0.2 * interaction_score
+        
+        # ✅ 편향 추가
+        ub = self.user_bias.get(user_id, 0) * 0.8
+        mb = self.movie_bias.get(movie_id, 0) * 0.8
+        
+        pred = self.mean_rating + combined_score * self.std_rating + ub + mb
         return np.clip(pred, 1, 5)
 
 
+    # ════════════════════════════════════════════════════════════════════════════════════════════════
+    # 추천 방법 5: Mixed (혼합) - 재설계
+    # Ricci et al. (2015): Recommender Systems Handbook
+    # Adomavicius & Tuzhilin (2005): Toward the next generation of recommender systems
+    # ════════════════════════════════════════════════════════════════════════════════════════════════
+
     def predict_mixed(self, user_id, movie_id):
-        """하이브리드 (혼합): 5가지 방법의 중앙값"""
+        """하이브리드 (혼합): 다중 전략 앙상블
+    
+        선행 연구:
+        - Ricci et al. (2015): 여러 예측값의 앙상블
+        - Adomavicius & Tuzhilin (2005): Cascade, Switching 전략
+    
+        전략:
+        1. 4가지 예측값 생성 (CF, CB, Weighted, Feature Combo)
+        2. 이상치 제거 (IQR 방식)
+        3. 가중 중앙값 계산
+        """
+        # ✅ 1단계: 4가지 예측값 생성
         cf_pred = self.predict_cf(user_id, movie_id)
         cb_pred = self.predict_cb(user_id, movie_id)
         weighted_pred = self.predict_weighted_avg(user_id, movie_id)
         feature_combo_pred = self.predict_feature_combo(user_id, movie_id)
         
-        # 5가지 예측값의 중앙값 사용
-        predictions = [cf_pred, cb_pred, weighted_pred, feature_combo_pred, weighted_pred]
-        pred = np.median(predictions)
+        predictions = np.array([cf_pred, cb_pred, weighted_pred, feature_combo_pred])
+        
+        # ✅ 2단계: 이상치 제거 (IQR)
+        q1 = np.percentile(predictions, 25)
+        q3 = np.percentile(predictions, 75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        
+        filtered_predictions = predictions[
+            (predictions >= lower_bound) & (predictions <= upper_bound)
+        ]
+        
+        # ✅ 3단계: 가중 중앙값 (사용자 활동성 고려)
+        user_ratings_count = len(self.train[self.train['userId'] == user_id])
+        
+        if len(filtered_predictions) == 0:
+            # 모든 값이 이상치인 경우
+            pred = np.median(predictions)
+        elif user_ratings_count >= 30:
+            # 활동적 사용자: CF, Weighted 선호 (가중 평균)
+            weights = np.array([0.35, 0.15, 0.35, 0.15])  # CF, CB, Weighted, Feature
+            pred = np.average(predictions, weights=weights)
+        elif user_ratings_count >= 10:
+            # 중간 사용자: 균형 (중앙값)
+            pred = np.median(filtered_predictions)
+        else:
+            # 비활동적 사용자: CB, Feature Combo 선호
+            weights = np.array([0.15, 0.35, 0.15, 0.35])
+            pred = np.average(predictions, weights=weights)
+    
         return np.clip(pred, 1, 5)
+
 
     def get_recommendations(self, user_id, n=10, method='weighted_avg'):
         """사용자에게 상위 N개 추천 영화 반환
