@@ -572,11 +572,17 @@ class OptimizedHybridRecommender:
         # 논문: "Feature Engineering in Recommender Systems"
         #       (Fastly et al., 2020)
         # 특징 구성: 장르(19) + 인기도(1) + 신규성(1) + 연도(1) + 평점(1) = 23개
+        # [Step 6] 특징 결합 - ✅ 학습 데이터에 있는 영화만 처리
         self.movie_features = {}
         self.item_to_idx = {}
         self.content_matrix = []
         
-        for i, movie_id in enumerate(self.movies['movieId']):
+        # ✅ 학습 데이터에 있는 영화만 필터링
+        movies_in_train = set(self.train['movieId'].unique())
+        filtered_movies = self.movies[self.movies['movieId'].isin(movies_in_train)]
+        
+        for content_idx, (i, row) in enumerate(filtered_movies.iterrows()):
+            movie_id = row['movieId']
             genre_feat = genres_matrix[i]
             
             if movie_id in popularity_series.index:
@@ -594,25 +600,22 @@ class OptimizedHybridRecommender:
                 avg_rating_feat = 0.5
             
             combined_feat = np.concatenate([
-                genre_feat.astype(float),                    # 19개
-                np.array([
-                    pop_feat,                                 # 1개
-                    nov_feat,                                 # 1개
-                    year_feat,                                # 1개 ← [신규]
-                    avg_rating_feat                           # 1개 ← [신규]
-                ])
+                genre_feat.astype(float),
+                np.array([pop_feat, nov_feat, year_feat, avg_rating_feat])
             ])
             
             self.movie_features[movie_id] = combined_feat
-            self.item_to_idx[movie_id] = i
+            self.item_to_idx[movie_id] = content_idx  # ✅ 순차 인덱싱 (0부터 시작)
             self.content_matrix.append(combined_feat)
+        
+        self.content_matrix = np.array(self.content_matrix)
+        print(f"   ✅ 콘텐츠 특징: {len(self.content_matrix)}개 (학습 데이터 기준)")
 
         # [Step 7] 코사인 유사도 계산
         # 논문: "Vector Space Model in Information Retrieval"
         #       (Salton et al., 1975)
         # 수식: similarity(i, j) = (v_i · v_j) / (||v_i|| × ||v_j||)
         # 범위: [-1, 1] (1에 가까울수록 유사함)
-        self.content_matrix = np.array(self.content_matrix)
         self.item_similarity = cosine_similarity(self.content_matrix)
 
         # 인기도 계산
@@ -789,10 +792,13 @@ class OptimizedHybridRecommender:
             idx_rated = self.item_to_idx[rated_id]
             rating = user_ratings[user_ratings['movieId'] == rated_id]['rating'].values[0]
             
-            # 가중치 = (평점 - 평균) × 신뢰도
-            base_weight = (rating - self.mean_rating) / (self.std_rating + 1e-8)
-            base_weight = np.clip(base_weight, -1, 1)
-            weight = base_weight * confidence
+            # ✅ 수정: confidence를 스케일 팩터로 변환 (0~1 → 0.5~1.0)
+            normalized_rating = (rating - self.mean_rating) / (self.std_rating + 1e-8)
+            normalized_rating = np.clip(normalized_rating, -1, 1)
+            
+            # confidence가 높을수록 weight의 영향력 증가
+            scale_factor = 0.5 + 0.5 * confidence  # 범위: [0.5, 1.0]
+            weight = normalized_rating * scale_factor
             
             user_profile += weight * self.content_matrix[idx_rated]
             rating_weights += abs(weight)
@@ -963,8 +969,9 @@ class OptimizedHybridRecommender:
         watched = set(self.train[self.train['userId'] == user_id]['movieId'])
         predictions = []
 
-        for movie_id in self.movies['movieId']:
-            if movie_id not in self.item_to_idx or movie_id in watched:
+        # ✅ 추가: item_to_idx의 영화만 순회 (안전함)
+        for movie_id in self.item_to_idx.keys():
+            if movie_id in watched:
                 continue
 
             if method.lower() == 'cf':
@@ -1192,7 +1199,7 @@ def validate_algorithms():
 
 def main():
     """MovieLens Small/1M 데이터셋에서 5가지 알고리즘 평가"""
-    datasets_to_test = ['Small']  # ← 테스트 시간 단축을 위해 Small만 사용
+    datasets_to_test = ['Small', '1M']  # ← ✅ 1M 추가
     all_results = []
 
     for dataset in datasets_to_test:
@@ -1205,7 +1212,20 @@ def main():
             print(f"❌ {dataset} 데이터셋 로드 실패, 건너뜀")
             continue
 
-        model = OptimizedHybridRecommender(ratings, movies, name=dataset, svd_dim=200)
+        # ✅ 데이터셋 크기에 따라 SVD 차원 조정
+        if dataset == 'Small':
+            svd_dim = 200
+            print(f"📌 SVD 차원: {svd_dim} (Small 데이터셋)")
+        else:  # 1M
+            svd_dim = 200  # 1M도 200 유지 (충분함)
+            print(f"📌 SVD 차원: {svd_dim} (1M 데이터셋)")
+
+        model = OptimizedHybridRecommender(
+            ratings, 
+            movies, 
+            name=f'{dataset}_Model',
+            svd_dim=svd_dim
+        )
         model._prepare()
         results = model.evaluate()
 
@@ -1214,43 +1234,103 @@ def main():
             metrics['Method'] = method
             all_results.append(metrics)
 
-    # 결과 출력
+    # ✅ 결과 출력 및 비교
     if all_results:
         print(f"\n{'='*100}")
-        print("📈 최종 결과 (5가지 알고리즘)")
+        print("📈 최종 결과 (5가지 알고리즘 × 2개 데이터셋)")
         print(f"{'='*100}")
 
         results_df = pd.DataFrame(all_results)
 
-        print("\n✅ 기본 정확도 지표:")
+        # 데이터셋별 요약
+        print("\n" + "="*100)
+        print("📊 데이터셋별 성능 비교")
+        print("="*100)
+        
+        for dataset in ['Small', '1M']:
+            dataset_df = results_df[results_df['Dataset'] == dataset]
+            if not dataset_df.empty:
+                print(f"\n🎬 {dataset} 데이터셋:")
+                print(f"   사용자 × 영화: {dataset_df['Dataset'].count()}개 알고리즘")
+                print(f"   희소성: {dataset_df['Sparsity'].mean():.4f}")
+                print(f"   평균 RMSE: {dataset_df['RMSE'].mean():.4f}")
+                print(f"   평균 조정RMSE: {dataset_df['Adjusted_RMSE'].mean():.4f}")
+
+        # 전체 기본 정확도 지표
+        print("\n" + "="*100)
+        print("✅ 기본 정확도 지표 (전체)")
+        print("="*100)
         print(results_df[['Dataset', 'Method', 'RMSE', 'MAE', 'Sparsity', 'Adjusted_RMSE']].to_string(index=False))
 
-        print("\n✅ 추천 정확성 지표 (Ranking Metrics):")
+        # 추천 정확성 지표
+        print("\n" + "="*100)
+        print("✅ 추천 정확성 지표 (Ranking Metrics)")
+        print("="*100)
         print(results_df[['Dataset', 'Method', 'Precision@10', 'Recall@10', 'F1@10', 'NDCG@10']].to_string(index=False))
 
-        print("\n✅ 순위 기반 지표:")
+        # 순위 기반 지표
+        print("\n" + "="*100)
+        print("✅ 순위 기반 지표")
+        print("="*100)
         print(results_df[['Dataset', 'Method', 'MAP@10', 'MRR@10', 'NDCG@10']].to_string(index=False))
 
-        print("\n✅ 다양성 및 품질 지표:")
+        # 다양성 및 품질 지표
+        print("\n" + "="*100)
+        print("✅ 다양성 및 품질 지표")
+        print("="*100)
         print(results_df[['Dataset', 'Method', 'Diversity', 'Coverage', 'Novelty', 'PopularityBias']].to_string(index=False))
 
         # CSV 저장
-        output_filename = 'hybrid_recommender_V11.csv'
+        output_filename = 'hybrid_recommender_v11_results.csv'
         results_df.to_csv(output_filename, index=False)
         print(f"\n✅ 결과 저장: {output_filename}")
 
-        # 최고 성능 요약
-        print("\n📊 성능 요약:")
-        print("-" * 100)
-        best_method = results_df.loc[results_df['RMSE'].idxmin(), 'Method']
-        best_rmse = results_df['RMSE'].min()
-        best_precision = results_df['Precision@10'].max()
-        best_novelty = results_df['Novelty'].max()
+        # ✅ 데이터셋별 최고 성능 알고리즘 비교
+        print("\n" + "="*100)
+        print("📊 데이터셋별 최고 성능 알고리즘")
+        print("="*100)
+        
+        for dataset in ['Small', '1M']:
+            dataset_df = results_df[results_df['Dataset'] == dataset]
+            if not dataset_df.empty:
+                best_idx = dataset_df['RMSE'].idxmin()
+                best_method = dataset_df.loc[best_idx, 'Method']
+                best_rmse = dataset_df.loc[best_idx, 'RMSE']
+                best_precision = dataset_df['Precision@10'].max()
+                best_novelty = dataset_df['Novelty'].max()
+                
+                print(f"\n🎯 {dataset} 데이터셋:")
+                print(f"   최고 성능 알고리즘: {best_method}")
+                print(f"   최저 RMSE: {best_rmse:.4f}")
+                print(f"   최고 Precision@10: {best_precision:.4f}")
+                print(f"   최고 Novelty: {best_novelty:.4f}")
 
-        print(f"✅ 최고 성능 알고리즘 (RMSE): {best_method}")
-        print(f"   - 최저 RMSE: {best_rmse:.4f}")
-        print(f"   - 최고 Precision@10: {best_precision:.4f}")
-        print(f"   - 최고 Novelty: {best_novelty:.4f}")
+        # ✅ Trade-off 분석
+        print("\n" + "="*100)
+        print("⚖️ 정확도 vs 다양성 Trade-off 분석")
+        print("="*100)
+        
+        for dataset in ['Small', '1M']:
+            dataset_df = results_df[results_df['Dataset'] == dataset]
+            if not dataset_df.empty:
+                print(f"\n📊 {dataset} 데이터셋:")
+                print(f"   RMSE와 Novelty 상관관계:")
+                correlation = dataset_df['RMSE'].corr(dataset_df['Novelty'])
+                print(f"   상관계수: {correlation:.4f}")
+                
+                # 최고 정확도 vs 최고 다양성
+                best_accuracy = dataset_df.loc[dataset_df['RMSE'].idxmin()]
+                best_diversity = dataset_df.loc[dataset_df['Novelty'].idxmax()]
+                
+                print(f"\n   ① 최고 정확도 (RMSE {best_accuracy['RMSE']:.4f}):")
+                print(f"      알고리즘: {best_accuracy['Method']}")
+                print(f"      다양성(Novelty): {best_accuracy['Novelty']:.4f}")
+                print(f"      커버리지: {best_accuracy['Coverage']:.4f}")
+                
+                print(f"\n   ② 최고 다양성 (Novelty {best_diversity['Novelty']:.4f}):")
+                print(f"      알고리즘: {best_diversity['Method']}")
+                print(f"      정확도(RMSE): {best_diversity['RMSE']:.4f}")
+                print(f"      커버리지: {best_diversity['Coverage']:.4f}")
     else:
         print("❌ 처리된 데이터셋이 없습니다")
 
@@ -1261,6 +1341,6 @@ if __name__ == "__main__":
     
     # 그 다음 메인 실행
     print("\n" + "="*100)
-    print("🚀 메인 평가 시작")
+    print("🚀 메인 평가 시작 (Small + 1M)")
     print("="*100)
     main()
