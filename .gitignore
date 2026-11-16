@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+movielens_data/*.zip
+.venv/
+.ipynb_checkpoints/
