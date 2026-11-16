@@ -116,7 +116,7 @@ class RecommenderEvaluator:
             precision_scores.append(self.metrics.precision_at_k(recommended, relevant, k=10))
             recall_scores.append(self.metrics.recall_at_k(recommended, relevant, k=10))
             f1_scores.append(self.metrics.f1_at_k(recommended, relevant, k=10))
-            ndcg_scores.append(self.metrics.ndcg_at_k(relevance, k=10))
+            ndcg_scores.append(self.metrics.ndcg_at_k(relevance, len(relevant), k=10))
             map_scores.append(self.metrics.map_at_k(recommended, relevant, k=10))
             mrr_scores.append(self.metrics.mrr_at_k(recommended, relevant, k=10))
             

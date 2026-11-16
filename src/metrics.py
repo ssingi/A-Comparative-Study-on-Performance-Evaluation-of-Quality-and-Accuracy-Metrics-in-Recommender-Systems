@@ -93,16 +93,23 @@ class AdvancedMetrics:
         return 2 * (precision * recall) / (precision + recall)
 
     @staticmethod
-    def ndcg_at_k(relevance, k=10):
-        """순위 지표: NDCG@K"""
-        rel_array = np.array(relevance[:k])
-        if len(rel_array) == 0:
+    def ndcg_at_k(relevance, num_relevant, k=10):
+        """순위 지표: NDCG@K (binary relevance)
+
+        relevance: 추천 순서대로 관련 여부(1/0)
+        num_relevant: 사용자의 전체 관련 아이템 수 (테스트셋에서 평점 4 이상)
+
+        IDCG는 관련 아이템 min(num_relevant, k)개가 1위부터 채워진
+        이상적인 목록 기준으로 계산한다. (추천 목록 안의 관련 아이템만
+        재정렬하면 적중 1개만 있어도 NDCG가 1.0이 되는 과대평가 발생)
+        """
+        rel_array = np.array(relevance[:k], dtype=float)
+        if len(rel_array) == 0 or num_relevant <= 0:
             return 0.0
         gains = rel_array / np.log2(np.arange(2, len(rel_array) + 2))
         dcg = np.sum(gains)
-        ideal_rel = np.sort(rel_array)[::-1]
-        ideal_gains = ideal_rel / np.log2(np.arange(2, len(ideal_rel) + 2))
-        idcg = np.sum(ideal_gains)
+        n_ideal = min(num_relevant, k)
+        idcg = np.sum(1.0 / np.log2(np.arange(2, n_ideal + 2)))
         if idcg == 0:
             return 0.0
         return dcg / idcg
